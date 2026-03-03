@@ -80,3 +80,112 @@ resource "helm_release" "milvus" {
 
   depends_on = [kubernetes_namespace_v1.docs_agent]
 }
+
+# ── Istio AuthorizationPolicies ───────────────────────────────────────────────
+# Required when the cluster runs Istio with a default-deny policy (full OKE
+# cluster with Kubeflow installed). Without these, Istio blocks intra-namespace
+# traffic to Milvus components even though pods are in the same namespace.
+# Gated by var.istio_enabled — set false for local Docker Desktop testing.
+
+resource "kubernetes_manifest" "allow_milvus_standalone" {
+  count = var.istio_enabled ? 1 : 0
+
+  manifest = {
+    apiVersion = "security.istio.io/v1beta1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-milvus-standalone"
+      namespace = var.namespace
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "milvus"
+          component                = "standalone"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          to = [
+            {
+              operation = {
+                ports = ["19530", "9091"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  depends_on = [helm_release.milvus]
+}
+
+resource "kubernetes_manifest" "allow_milvus_etcd" {
+  count = var.istio_enabled ? 1 : 0
+
+  manifest = {
+    apiVersion = "security.istio.io/v1beta1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-milvus-etcd"
+      namespace = var.namespace
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "etcd"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          to = [
+            {
+              operation = {
+                ports = ["2379", "2380"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  depends_on = [helm_release.milvus]
+}
+
+resource "kubernetes_manifest" "allow_milvus_minio" {
+  count = var.istio_enabled ? 1 : 0
+
+  manifest = {
+    apiVersion = "security.istio.io/v1beta1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-milvus-minio"
+      namespace = var.namespace
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          app = "minio"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          to = [
+            {
+              operation = {
+                ports = ["9000", "9001"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  depends_on = [helm_release.milvus]
+}

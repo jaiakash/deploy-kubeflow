@@ -2,6 +2,47 @@
 # OCI Authentication
 # ============================================================
 
+variable "compartment_id" {
+  description = "OCI compartment OCID to deploy all resources into"
+  type        = string
+}
+
+variable "cluster_name" {
+  description = "Display name for the OKE cluster and VCN resources"
+  type        = string
+  default     = "docs-agent-cluster"
+}
+
+variable "k8s_version" {
+  description = "Kubernetes version for the OKE cluster (e.g. v1.30.1)"
+  type        = string
+  default     = "v1.30.1"
+}
+
+variable "node_count" {
+  description = "Number of ARM worker nodes (2 for HA on free tier)"
+  type        = number
+  default     = 2
+}
+
+variable "node_ocpus" {
+  description = "OCPUs per node — free tier allows 4 total across A1.Flex"
+  type        = number
+  default     = 2
+}
+
+variable "node_memory_gb" {
+  description = "Memory per node in GB — free tier allows 24 GB total"
+  type        = number
+  default     = 12
+}
+
+variable "node_boot_volume_gb" {
+  description = "Boot volume size per node in GB"
+  type        = number
+  default     = 50
+}
+
 variable "tenancy_ocid" {
   description = "OCID of your OCI tenancy"
   type        = string
@@ -94,26 +135,25 @@ variable "milvus_chart_version" {
 }
 
 # ============================================================
-# LLM — External API (default, no GPU required)
+# LLM — Groq (used by kagent ModelConfig)
 # ============================================================
 
-variable "external_llm_endpoint" {
-  description = "OpenAI-compatible chat completions endpoint when deploy_kserve = false"
+variable "groq_api_key" {
+  description = "Groq API key for the kagent ModelConfig"
   type        = string
-  default     = "https://api.groq.com/openai/v1/chat/completions"
+  sensitive   = true
 }
 
-variable "external_llm_model" {
-  description = "Model name passed to the external LLM endpoint"
+variable "llm_model" {
+  description = "Groq model name passed to the kagent ModelConfig"
   type        = string
   default     = "llama-3.1-8b-instant"
 }
 
-variable "external_llm_api_key" {
-  description = "API key for the external LLM provider (Groq, Together.ai, etc.)"
+variable "llm_base_url" {
+  description = "OpenAI-compatible base URL for the LLM provider"
   type        = string
-  sensitive   = true
-  default     = ""
+  default     = "https://api.groq.com/openai/v1"
 }
 
 # ============================================================
@@ -140,17 +180,34 @@ variable "kserve_model_id" {
 }
 
 # ============================================================
-# API Server
+# MCP Server
 # ============================================================
 
-variable "api_image" {
-  description = "Docker image for the docs-agent API server (FastAPI)"
+variable "mcp_image" {
+  description = "Docker image for the MCP server (kagent-feast-mcp/mcp-server/). Built by Santosh."
   type        = string
-  # No default — must be supplied. Build and push the image first.
+  # No default — Santosh is building and publishing this image.
 }
 
-variable "api_replicas" {
-  description = "Number of API server pod replicas"
+variable "mcp_replicas" {
+  description = "Number of MCP server pod replicas"
   type        = number
   default     = 1
+}
+
+variable "milvus_password" {
+  description = "Milvus root password (default Milvus standalone install uses 'Milvus')"
+  type        = string
+  sensitive   = true
+  default     = "Milvus"
+}
+
+# ============================================================
+# Istio
+# ============================================================
+
+variable "istio_enabled" {
+  description = "Set to true on OCI cluster (Istio installed). Deploys Milvus AuthorizationPolicies. Set false for local Docker Desktop testing."
+  type        = bool
+  default     = true
 }

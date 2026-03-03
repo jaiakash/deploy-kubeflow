@@ -12,3 +12,9 @@ variable "chart_version" {
   description = "Milvus Helm chart version"
   type        = string
 }
+
+variable "istio_enabled" {
+  description = "Set to true when Istio is installed (full OCI cluster). Deploys AuthorizationPolicies to allow traffic to Milvus, etcd, and MinIO pods."
+  type        = bool
+  default     = true
+}

@@ -343,162 +343,213 @@ Terraform correctly destroys RoleBinding before Role (dependency order), then He
 
 ---
 
-### Phase 4 — API Server Module ✅ COMPLETE (implemented, image pending)
+### Phase 4 — MCP Server + kagent 
 
-**Goal:** `/health` returns 200, `/chat` returns a response from the external LLM.
+> **Architecture change (confirmed by Santosh):** The `server-https` FastAPI server is deprecated. The new approach uses [`kagent-feast-mcp`](https://github.com/kubeflow/docs-agent/tree/main/kagent-feast-mcp) — a FastMCP tool server + kagent agent framework.
+
+#### Why the architecture changed
+
+| | Old (`server-https`) | New (`kagent-feast-mcp`) |
+|-|----------------------|--------------------------|
+| User interface | curl `/chat` endpoint | kagent UI (port-forwarded) |
+| LLM orchestration | FastAPI calls Groq directly | kagent `Agent` CRD manages routing |
+| Tool protocol | Custom function call in app.py | MCP (Model Context Protocol) |
+| Milvus access | Direct from API server | Via MCP server `search_kubeflow_docs` tool |
+| Vector store pipeline | Milvus native | KFP pipeline → Feast → Milvus |
+| Collection name | `docs_rag` | `kubeflow_docs_docs_rag` (Feast naming) |
+
+#### New architecture
+
+```
+User
+  │
+  ▼
+kagent UI (port 8080)
+  │
+  ▼
+kagent Agent CRD ──► Groq LLM (ModelConfig)
+  │
+  │  [Tool call: search_kubeflow_docs]
+  ▼
+MCP Server (FastMCP, port 8000/mcp)
+  │
+  ▼
+Milvus (kubeflow_docs_docs_rag collection)
+```
+
+#### What was deleted
+
+- `modules/api-server/` — removed entirely
+
+#### What was implemented
+
+**`modules/mcp-server/`** — replaces `api-server`
+
+| Resource | Name |
+|----------|------|
+| `kubernetes_config_map_v1` | `mcp-server-config` |
+| `kubernetes_secret_v1` | `mcp-server-secret` |
+| `kubernetes_deployment_v1` | `mcp-kubeflow-docs` |
+| `kubernetes_service_v1` | `mcp-kubeflow-docs` |
+
+- ConfigMap injects: `MILVUS_URI`, `MILVUS_USER`, `COLLECTION_NAME`, `EMBEDDING_MODEL`, `PORT`
+- Secret injects: `MILVUS_PASSWORD` (sensitive)
+- TCP readiness/liveness probes — FastMCP has no plain `/health` endpoint
+- Resources: requests 500m/1Gi, limits 1CPU/2Gi
+- Output: `mcp_endpoint` = `http://mcp-kubeflow-docs.<namespace>.svc.cluster.local:8000/mcp`
+
+**`modules/kagent/`** — new
+
+| Resource | Kind | Name |
+|----------|------|------|
+| `helm_release` | Helm | `kagent-crds` |
+| `helm_release` | Helm | `kagent` |
+| `kubernetes_secret_v1` | Secret | `kagent-groq` |
+| `kubernetes_manifest` | `ModelConfig` | `groq-llama` |
+| `kubernetes_manifest` | `RemoteMCPServer` | `kubeflow-docs-mcp` |
+| `kubernetes_manifest` | `Agent` | `kubeflow-docs-agent` |
+
+- kagent Helm charts from `oci://ghcr.io/kagent-dev/kagent/helm/`
+- All built-in agents disabled (only our custom `Agent` CRD is active)
+- `ModelConfig` uses `kagent.dev/v1alpha2` API, provider=OpenAI, baseUrl=Groq
+- `RemoteMCPServer` points to MCP server in-cluster URL
+- `Agent` includes the full system prompt with Kubeflow routing rules
+
+**`modules/milvus/` additions** — Istio AuthorizationPolicies
+
+Three `security.istio.io/v1beta1` `AuthorizationPolicy` resources, gated by `var.istio_enabled`:
+
+| Policy | Target | Ports |
+|--------|--------|-------|
+| `allow-milvus-standalone` | Milvus pod | 19530, 9091 |
+| `allow-milvus-etcd` | etcd pod | 2379, 2380 |
+| `allow-milvus-minio` | MinIO pod | 9000, 9001 |
+
+Required on OCI cluster (Kubeflow installs Istio with default-deny). Set `istio_enabled = false` for local Docker Desktop testing.
+
+#### Pending — waiting on Santosh
+
+- **MCP server image** — needs to be built from [`kagent-feast-mcp/mcp-server/`](https://github.com/kubeflow/docs-agent/tree/main/kagent-feast-mcp/mcp-server) and published
+- **`server.py` env var support** — currently hardcodes `MILVUS_URI`, `MILVUS_USER` etc. as module-level constants. Needs to read from `os.getenv()` for the Terraform ConfigMap to take effect
+- Once image is available: set `var.mcp_image` and run end-to-end test on OCI cluster
+
+#### Test commands (once image is ready)
+```bash
+terraform apply \
+  -target=module.milvus \
+  -target=module.rbac \
+  -target=module.mcp_server \
+  -target=module.kagent \
+  -var="mcp_image=<registry>/mcp-kubeflow-docs:<tag>" \
+  -var="groq_api_key=<key>" \
+  -var="istio_enabled=false"   # for local; true on OCI
+
+# Access kagent UI
+kubectl -n docs-agent port-forward service/kagent-ui 8080:8080
+# Open http://localhost:8080
+```
+
+---
+
+### Phase 5 — KServe LLM Module ✅ COMPLETE (plan-tested, apply requires GPU + KServe)
+
+**Goal:** Module is written and plan-testable with `deploy_kserve = false`. Ready to activate when a GPU node is available.
 
 **Files implemented:**
-- `modules/api-server/main.tf` — `kubernetes_config_map_v1` + `kubernetes_secret_v1` + `kubernetes_deployment_v1` + `kubernetes_service_v1`
-- `modules/api-server/variables.tf` — updated with build instructions for the image
-- `modules/api-server/outputs.tf` — dynamic URL referencing actual service metadata
+- `modules/kserve-llm/main.tf` — `kubernetes_secret_v1` (HF token) + `kubernetes_manifest` (ServingRuntime + InferenceService)
 
-**Source of truth:** All specs (env vars, resource limits, security context) sourced from upstream [`kubeflow/docs-agent`](https://github.com/kubeflow/docs-agent/tree/main/server-https) — `app.py`, `Dockerfile`, and `deployment.yaml`.
+**Resources created (when `deploy_kserve = true`):**
 
-**Image:**
-No pre-built public image exists for the API server. It must be built and pushed from source:
-```bash
-cd server-https   # in the kubeflow/docs-agent repo
-docker build -t <your-registry>/docs-agent-https-api:latest .
-docker push <your-registry>/docs-agent-https-api:latest
+| Resource | Kind | Name |
+|----------|------|------|
+| `kubernetes_secret_v1` | Secret | `huggingface-secret` |
+| `kubernetes_manifest` | `ServingRuntime` | `llm-runtime` |
+| `kubernetes_manifest` | `InferenceService` | `llama` |
+
+**ServingRuntime spec:**
+- Image: `kserve/huggingfaceserver:latest-gpu`
+- Command: `python -m huggingfaceserver`
+- Resources: 4 CPU / 16 Gi memory / 1 GPU (requests), 6 CPU / 24 Gi / 1 GPU (limits)
+
+**InferenceService spec:**
+- Model: `var.model_id` (default: `RedHatAI/Llama-3.1-8B-Instruct`)
+- Backend: `vllm`, max context length 32768, GPU memory utilization 90%
+- Tool calling enabled (`--enable-auto-tool-choice`, `--tool-call-parser=llama3_json`) — required for `search_kubeflow_docs` function calls
+- HF token injected from `huggingface-secret` via `secretKeyRef`
+
+**KServe endpoint output:**
 ```
-The `image` variable has no default — callers must supply it explicitly.
+http://llama.docs-agent.svc.cluster.local/openai/v1/chat/completions
+```
+This is wired into `module.api_server.llm_endpoint` automatically when `deploy_kserve = true`.
 
-**Resources created:**
+**Why `kubernetes_manifest` instead of native resources:**
+KServe's `ServingRuntime` and `InferenceService` are custom resources. The Kubernetes Terraform provider doesn't have native resource types for them — `kubernetes_manifest` handles arbitrary CRDs by passing raw HCL maps.
 
-| Resource | Name | Namespace |
-|----------|------|-----------|
-| `kubernetes_config_map_v1` | `docs-agent-api-config` | `docs-agent` |
-| `kubernetes_secret_v1` | `docs-agent-api-secret` | `docs-agent` |
-| `kubernetes_deployment_v1` | `docs-agent-api` | `docs-agent` |
-| `kubernetes_service_v1` | `docs-agent-api` | `docs-agent` |
-
-**ConfigMap env vars (8 keys):**
-
-| Key | Value | Source |
-|-----|-------|--------|
-| `MILVUS_HOST` | `var.milvus_host` | Milvus module output |
-| `MILVUS_PORT` | `tostring(var.milvus_port)` | Milvus module output |
-| `MILVUS_COLLECTION` | `docs_rag` | Hardcoded — matches ETL pipeline |
-| `MILVUS_VECTOR_FIELD` | `vector` | Hardcoded — matches ETL pipeline |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-mpnet-base-v2` | Must match ETL embedding model |
-| `MODEL` | `var.llm_model` | Configurable — e.g. `llama-3.1-8b-instant` |
-| `PORT` | `8000` | Matches container port |
-| `PYTHONUNBUFFERED` | `1` | Ensures logs are flushed immediately |
-
-**Secret keys (sensitive):**
-
-| Key | Value |
-|-----|-------|
-| `KSERVE_URL` | `var.llm_endpoint` — LLM endpoint URL |
-| `LLM_API_KEY` | `var.llm_api_key` — API key (empty for KServe) |
+**Known limitation — CRD must exist at plan time:**
+`kubernetes_manifest` requires the CRD to be registered in the cluster when `terraform plan` runs (for field validation). Since KServe is installed by the `kubeflow-platform` module (Phase 6), planning with `deploy_kserve=true` on a bare cluster will warn:
+```
+no matches for kind "ServingRuntime" in group "serving.kserve.io"
+```
+This is expected locally. On the real OCI cluster with KServe installed, planning succeeds cleanly.
 
 **Test results (Docker Desktop):**
 
 | Test | Result | Notes |
 |------|--------|-------|
-| `terraform apply -target=module.milvus -target=module.rbac -target=module.api_server` | ✅ 7/8 resources created | ConfigMap, Secret, Service all created |
-| Deployment rollout wait | ⏳ Times out | Expected — no pre-built image at `ghcr.io/jaiakash/docs-agent-api:latest` |
-| ConfigMap keys verified | ✅ All 8 keys correct | Confirmed via `kubectl get configmap docs-agent-api-config -n docs-agent -o yaml` |
-| Secret decoded | ✅ `KSERVE_URL` = Groq endpoint | Confirmed via `kubectl get secret docs-agent-api-secret -n docs-agent -o json \| jq` |
-| Security context | ✅ `runAsUser: 1000`, `allowPrivilegeEscalation: false` | Confirmed in pod spec |
-
-**Image:**
-A multi-arch (`linux/amd64` + `linux/arm64`) image was built via GitHub Actions in the forked repo and published to GHCR:
-```
-ghcr.io/kmr-rohit/docs-agent-api:sha-1f1339a
-```
-
-**Upstream fix applied:**
-The original `app.py` made unauthenticated requests to the LLM endpoint — no `Authorization` header was sent. This works for KServe (internal, no auth) but fails with external providers like Groq (HTTP 401). Fix submitted to `kubeflow/docs-agent`:
-```python
-headers = {}
-if LLM_API_KEY:
-    headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-
-async with client.stream("POST", KSERVE_URL, json=payload, headers=headers) as response:
-```
-
-**Test results (Docker Desktop, Groq external LLM):**
-
-| Test | Result |
-|------|--------|
-| `terraform apply` | ✅ 8/8 resources created |
-| `kubectl rollout status deployment/docs-agent-api` | ✅ Successfully rolled out |
-| `GET /health` | ✅ 200 OK |
-| `POST /chat` with `stream: false` | ✅ Full LLM response returned |
-| `citations` field | `null` — expected, Milvus has no data yet (ETL pipeline not run) |
-
-**Sample response:**
-```json
-{
-  "response": "Kubeflow Pipelines is a platform for building, deploying, and managing machine learning (ML) pipelines...",
-  "citations": null
-}
-```
-
-`citations: null` is expected at this stage — the Milvus collection is empty until the KFP ETL pipeline runs to fetch, chunk, embed, and store the Kubeflow docs. Once populated, the `search_kubeflow_docs` tool call in the response will return real citations.
-
-**Test commands:**
-```bash
-# Apply
-terraform apply \
-  -target=module.milvus \
-  -target=module.rbac \
-  -target=module.api_server \
-  -var="kubeconfig_path=~/.kube/config" \
-  -var="api_image=ghcr.io/kmr-rohit/docs-agent-api:sha-1f1339a" \
-  -var="external_llm_api_key=<groq-key>"
-
-# Watch rollout
-kubectl rollout status deployment/docs-agent-api -n docs-agent
-
-# Health check
-kubectl port-forward svc/docs-agent-api -n docs-agent 8000:8000 &
-curl http://localhost:8000/health
-
-# Chat endpoint
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is Kubeflow Pipelines?", "stream": false}'
-```
+| `terraform validate` | ✅ Valid | |
+| `plan -var="deploy_kserve=false"` | ✅ 8 resources, 0 KServe | Toggle works correctly |
+| `plan -var="deploy_kserve=true"` | ✅ 9 resources planned | HF secret appears; CRD warning expected (no KServe locally) |
+| `kserve_endpoint` output | ✅ Correct URL | `http://llama.docs-agent.svc.cluster.local/openai/v1/chat/completions` |
 
 ---
 
-### Phase 5 — KServe LLM Module (write, don't apply yet)
-
-**Goal:** Module is written and plan-testable with `deploy_kserve = false`. Ready to activate when a GPU node is available.
-
-**Files to implement:**
-- `modules/kserve-llm/main.tf` — `kubernetes_secret` (HF token) + `kubernetes_manifest` (ServingRuntime + InferenceService)
-- `modules/kserve-llm/manifests/serving-runtime.yaml`
-- `modules/kserve-llm/manifests/inference-service.yaml`
-
-**Key implementation details:**
-- ServingRuntime: `kserve/huggingfaceserver:latest-gpu`, requests `nvidia.com/gpu: 1`
-- InferenceService: model from HuggingFace, backend `vllm`, context length 32768
-- `count = var.deploy_kserve ? 1 : 0` — zero resources when GPU not available
-- HF token stored in a `kubernetes_secret`, referenced via `secretKeyRef`
-
-**Test:** `terraform plan -var="deploy_kserve=false"` → no KServe resources in plan.
-
----
-
-### Phase 6 — Kubeflow Platform Module 
+### Phase 6 — Kubeflow Platform Module ✅ COMPLETE (implemented, full test on OCI cluster)
 
 **Goal:** Full `terraform apply` from bare OKE cluster to running Kubeflow + docs-agent stack.
 
-**Files to implement:**
-- `modules/kubeflow-platform/main.tf` — `null_resource` with `local-exec` create and destroy provisioners
-- `scripts/install-kubeflow.sh` — loops through `kf_components`, applies each via kustomize with retry logic
-- `scripts/configure-kubectl.sh` — helper to set up kubeconfig from OCI
+**Files implemented:**
+- `modules/kubeflow-platform/main.tf` — `null_resource` with create + destroy `local-exec` provisioners
+- `scripts/install-kubeflow.sh` — clones manifests, applies components with retry, waits for core namespaces
+- `scripts/uninstall-kubeflow.sh` — deletes components in reverse order
+- `scripts/configure-kubectl.sh` — OCI OKE kubeconfig helper (run once before `terraform apply`)
 
-**Key implementation details:**
-- Install script clones `github.com/kubeflow/manifests` at `var.kf_version`
-- Applies components in order with `kubectl apply -k` and a retry loop (CRDs need time to establish)
-- Destroy provisioner runs `kubectl delete -k` in reverse order
-- `triggers` on `kf_version` and `kf_components` hash — forces reinstall when either changes
+**Provider added:** `hashicorp/null >= 3.0.0` — added to `providers.tf` for `null_resource`.
 
-**Test:** `kubectl get pods -n kubeflow` — all pods Running/Completed.
+**Why `null_resource` + `local-exec`:**
+Kubeflow manifests are designed for Kustomize, not Terraform. Using `kubernetes_manifest` for 200+ resources would be a maintenance nightmare and fights the official install method. The `null_resource` approach wraps the supported `kustomize build | kubectl apply` workflow while giving Terraform a hook to track install state and trigger re-installs.
+
+**Triggers — when does Kubeflow re-install?**
+
+| Trigger | Change that forces re-install |
+|---------|------------------------------|
+| `kf_version` | Branch/tag changed (e.g. `master` → `v1.9.0`) |
+| `kf_components` | Component list changed (added/removed a component) |
+| `kubeconfig` | Switched to a different cluster |
+
+**Install script key details:**
+- Clones `github.com/kubeflow/manifests` at `$KF_VERSION` to `/tmp/kubeflow-manifests`
+- If already cloned, fetches + checks out the specified version (idempotent)
+- Uses `--server-side` apply — avoids `metadata.annotations size exceeds 262144 bytes` error that large Kubeflow manifests hit with client-side apply
+- Retry loop (5 attempts, 30s wait) — CRDs (cert-manager, Istio) take time to establish; later components that use those CRDs fail on attempt 1 and succeed on retry 2+
+- Waits for `cert-manager`, `istio-system`, `kubeflow` deployments to be `Available` after install
+
+**Destroy script key details:**
+- Reads `$KF_COMPONENTS` from `self.triggers` (the exact list used at install time)
+- Deletes in reverse order — ensures dependencies are cleaned up after dependents
+- `--ignore-not-found=true` — safe to run even if some resources were already removed
+
+**`self.triggers` pattern for destroy:**
+The destroy provisioner can't call Terraform functions — it can only read `self.triggers.*`. By storing `kf_components` as a comma-joined string in triggers (not a hash), the destroy script can reconstruct the full list:
+```hcl
+triggers = {
+  kf_components = join(",", var.kf_components)  # stored as string, not hash
+}
+# In destroy provisioner:
+KF_COMPONENTS = self.triggers.kf_components
+```
+
+**Test:** `terraform validate` ✅ — full end-to-end test runs on OCI cluster (requires real OKE + kubectl + kustomize).
 
 ---
 

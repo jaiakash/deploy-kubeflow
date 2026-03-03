@@ -1,6 +1,23 @@
 # Root orchestration — calls modules in dependency order.
-# Akash's OKE cluster module is assumed to already exist and have
-# written a kubeconfig to var.kubeconfig_path before this runs.
+
+# ============================================================
+# Layer 0: OKE Cluster (VCN + networking + OKE + node pool)
+# ============================================================
+# Creates the OCI infrastructure. All other modules depend on
+# this cluster existing and the kubeconfig being generated.
+
+module "oke_cluster" {
+  source = "./modules/oke-cluster"
+
+  compartment_id      = var.compartment_id
+  region              = var.region
+  cluster_name        = var.cluster_name
+  k8s_version         = var.k8s_version
+  node_count          = var.node_count
+  node_ocpus          = var.node_ocpus
+  node_memory_gb      = var.node_memory_gb
+  node_boot_volume_gb = var.node_boot_volume_gb
+}
 
 # ============================================================
 # Phase 1: Kubeflow Platform (via Kustomize wrapper)
@@ -14,6 +31,8 @@ module "kubeflow_platform" {
   kf_version      = var.kf_version
   kf_components   = var.kf_components
   kubeconfig_path = var.kubeconfig_path
+
+  depends_on = [module.oke_cluster]
 }
 
 # ============================================================
@@ -23,9 +42,10 @@ module "kubeflow_platform" {
 module "milvus" {
   source = "./modules/milvus"
 
-  namespace     = var.milvus_namespace
-  release_name  = var.milvus_release_name
-  chart_version = var.milvus_chart_version
+  namespace      = var.milvus_namespace
+  release_name   = var.milvus_release_name
+  chart_version  = var.milvus_chart_version
+  istio_enabled  = var.istio_enabled
 
   depends_on = [module.kubeflow_platform]
 }
@@ -43,22 +63,18 @@ module "rbac" {
 }
 
 # ============================================================
-# Phase 4: API Server (FastAPI docs-agent)
+# Phase 4: MCP Server (FastMCP tool server for kagent)
 # ============================================================
 
-module "api_server" {
-  source = "./modules/api-server"
+module "mcp_server" {
+  source = "./modules/mcp-server"
 
-  namespace   = var.milvus_namespace
-  image       = var.api_image
-  replicas    = var.api_replicas
-  milvus_host = module.milvus.milvus_host
-  milvus_port = module.milvus.milvus_port
-
-  # LLM endpoint — switches between external API and KServe automatically
-  llm_endpoint = var.deploy_kserve ? module.kserve_llm[0].kserve_endpoint : var.external_llm_endpoint
-  llm_model    = var.deploy_kserve ? var.kserve_model_id : var.external_llm_model
-  llm_api_key  = var.external_llm_api_key
+  namespace       = var.milvus_namespace
+  image           = var.mcp_image
+  replicas        = var.mcp_replicas
+  milvus_host     = module.milvus.milvus_host
+  milvus_port     = module.milvus.milvus_port
+  milvus_password = var.milvus_password
 
   depends_on = [module.milvus, module.rbac]
 }
@@ -77,4 +93,20 @@ module "kserve_llm" {
   huggingface_token = var.huggingface_token
 
   depends_on = [module.kubeflow_platform]
+}
+
+# ============================================================
+# Phase 6b: kagent (agent orchestration + UI)
+# ============================================================
+
+module "kagent" {
+  source = "./modules/kagent"
+
+  namespace      = var.milvus_namespace
+  groq_api_key   = var.groq_api_key
+  llm_model      = var.llm_model
+  llm_base_url   = var.llm_base_url
+  mcp_server_url = module.mcp_server.mcp_endpoint
+
+  depends_on = [module.mcp_server]
 }
