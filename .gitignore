@@ -38,5 +38,8 @@ oci_api_key*.pem
 *.swp
 *.swo
 
+# Claude Code local settings
+.claude/
 
-Explanations/Phase1.md
+# Local scratch / explanations
+Explanations/
