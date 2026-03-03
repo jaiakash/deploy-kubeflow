@@ -177,7 +177,7 @@ User Response + Citations
 
 ## 4. Phase-wise Implementation Plan
 
-### Phase 1 — Skeleton
+### Phase 1 — Skeleton ✅ COMPLETE
 
 **Goal:** `terraform init` and `terraform validate` pass on a clean machine. No cloud resources created.
 
@@ -207,21 +207,86 @@ User Response + Citations
 
 ---
 
-### Phase 2 — Milvus Module
+### Phase 2 — Milvus Module ✅ COMPLETE (tested on Docker Desktop)
 
 **Goal:** `terraform apply` creates a working Milvus standalone instance. `terraform destroy` removes it cleanly.
 
-**Files to implement:**
-- `modules/milvus/main.tf` — `kubernetes_namespace` + `helm_release`
+**Files implemented:**
+- `modules/milvus/main.tf` — `kubernetes_namespace_v1` + `helm_release`
 
-**Key implementation details:**
-- Chart: `milvus/milvus` from `https://zilliztech.github.io/milvus-helm/`
-- Mode: standalone (not cluster) — fits within 24 GB, matches docs-agent README
-- Persistence: disabled for dev (`etcd.persistence.enabled = false`)
-- Pulsar: disabled (`pulsar.enabled = false`, `pulsarv3.enabled = false`)
-- Istio sidecar: disabled on standalone pod (`sidecar.istio.io/inject: "false"`) — avoids mTLS issues during init
+**Helm chart:**
+- Repo: `https://zilliztech.github.io/milvus-helm/`
+- Chart: `milvus`, version `4.2.7`
+- Deployed Milvus `v2.4.9`
 
-**Test:** `python -c "from pymilvus import connections; connections.connect(...)"` returns connected.
+**Helm values used:**
+
+| Key | Value | Reason |
+|-----|-------|--------|
+| `cluster.enabled` | `false` | Standalone mode — single pod, no ZooKeeper |
+| `pulsar.enabled` | `false` | Standalone falls back to embedded RocksMQ |
+| `pulsarv3.enabled` | `false` | Same — disable both Pulsar versions |
+| `etcd.replicaCount` | `1` | One replica sufficient for standalone |
+| `etcd.persistence.enabled` | `false` | Ephemeral — acceptable for dev |
+| `minio.mode` | `standalone` | Single MinIO instance |
+| `minio.persistence.enabled` | `false` | Ephemeral object storage |
+| `standalone.persistence.enabled` | `false` | Prevents PVC for RocksMQ data (see issues below) |
+| `standalone.podAnnotations` | `sidecar.istio.io/inject: "false"` | Avoids Istio mTLS conflict during gRPC init |
+| `standalone.resources.requests` | `1Gi / 500m` | Sized for 24 GB OCI free tier |
+| `standalone.resources.limits` | `3Gi / 2 CPU` | Headroom for peak usage |
+
+**Why `yamlencode({...})` instead of `set {}` blocks:**
+Helm `set` blocks use dot-notation paths — keys with dots in them (e.g., `sidecar.istio.io/inject`) require escaping and become error-prone. A single `values` block with `yamlencode` handles arbitrary key names cleanly and keeps the config readable as a unified structure.
+
+**Provider fixes discovered during implementation:**
+| Issue | Fix |
+|-------|-----|
+| `kubernetes_namespace` deprecated in provider v3 | Changed to `kubernetes_namespace_v1` |
+| Helm provider v3 changed `kubernetes {}` block to assignment | Changed to `kubernetes = {}` |
+
+**Local testing setup:**
+The `backend.tf` S3 backend blocks `terraform apply` without an OCI bucket. For local testing, create `backend_override.tf` (already gitignored via `*_override.tf` pattern):
+```hcl
+terraform {
+  backend "local" {}
+}
+```
+Then run `terraform init -reconfigure`. Delete this file when connecting to the real OCI backend.
+
+**Issues found and fixed:**
+
+1. **PVC leftover on destroy (first run):** Helm uninstall kept a `PersistentVolumeClaim` for the Milvus standalone pod's RocksMQ data due to the chart's `helm.sh/resource-policy: keep` annotation. The namespace deletion eventually cleaned it up (~53 s wait), but it caused an unnecessary delay and a warning.
+   - **Fix:** Added `standalone.persistence.enabled = false` to the Helm values. No PVC is created, destroy is clean.
+
+**Test results (Docker Desktop — 7.8 GB RAM, 10 CPU):**
+
+| Test | Result |
+|------|--------|
+| `terraform apply -target=module.milvus` | ✅ 2 resources created (1m41s, images cached) |
+| `kubectl get pods -n docs-agent` | ✅ `milvus-standalone`, `etcd-0`, `minio` all `1/1 Running` |
+| `kubectl get svc -n docs-agent` | ✅ `my-release-milvus` ClusterIP on port `19530/9091` |
+| pymilvus connection test | ✅ `Connected! version: v2.4.9, collections: []` |
+| `terraform destroy -target=module.milvus` | ✅ 2 resources destroyed, no PVC warning, namespace gone in 43s |
+
+**Test commands:**
+```bash
+# Apply
+terraform apply -target=module.milvus -var="kubeconfig_path=~/.kube/config" ...
+
+# Verify pods
+kubectl get pods -n docs-agent
+
+# Connectivity test
+kubectl port-forward svc/my-release-milvus -n docs-agent 19530:19530 &
+python3 -c "
+from pymilvus import connections, utility
+connections.connect('default', host='localhost', port='19530')
+print('Connected! version:', utility.get_server_version())
+"
+
+# Teardown
+terraform destroy -target=module.milvus ...
+```
 
 ---
 

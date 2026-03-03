@@ -32,9 +32,10 @@ provider "kubernetes" {
   config_path = var.kubeconfig_path
 }
 
-# Helm provider — same cluster, uses the same kubeconfig
+# Helm provider — same cluster, uses the same kubeconfig.
+# Helm provider v3 changed `kubernetes {}` block to an assignment.
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     config_path = var.kubeconfig_path
   }
 }

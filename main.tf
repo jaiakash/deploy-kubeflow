@@ -49,9 +49,9 @@ module "rbac" {
 module "api_server" {
   source = "./modules/api-server"
 
-  namespace  = var.milvus_namespace
-  image      = var.api_image
-  replicas   = var.api_replicas
+  namespace   = var.milvus_namespace
+  image       = var.api_image
+  replicas    = var.api_replicas
   milvus_host = module.milvus.milvus_host
   milvus_port = module.milvus.milvus_port
 
