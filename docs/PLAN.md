@@ -343,23 +343,123 @@ Terraform correctly destroys RoleBinding before Role (dependency order), then He
 
 ---
 
-### Phase 4 — API Server Module
+### Phase 4 — API Server Module ✅ COMPLETE (implemented, image pending)
 
 **Goal:** `/health` returns 200, `/chat` returns a response from the external LLM.
 
-**Files to implement:**
-- `modules/api-server/main.tf` — `kubernetes_deployment` + `kubernetes_service` + `kubernetes_config_map` + `kubernetes_secret`
+**Files implemented:**
+- `modules/api-server/main.tf` — `kubernetes_config_map_v1` + `kubernetes_secret_v1` + `kubernetes_deployment_v1` + `kubernetes_service_v1`
+- `modules/api-server/variables.tf` — updated with build instructions for the image
+- `modules/api-server/outputs.tf` — dynamic URL referencing actual service metadata
 
-**Key implementation details:**
-- ConfigMap sets: `MILVUS_HOST`, `MILVUS_PORT`, `MILVUS_COLLECTION`, `EMBEDDING_MODEL`, `MODEL`, `PORT`
-- Secret sets: `KSERVE_URL` (LLM endpoint), `LLM_API_KEY`
-- Service: ClusterIP initially; add LoadBalancer or Istio VirtualService for external access
-- Resource requests: `256Mi` memory, `250m` CPU (small footprint)
+**Source of truth:** All specs (env vars, resource limits, security context) sourced from upstream [`kubeflow/docs-agent`](https://github.com/kubeflow/docs-agent/tree/main/server-https) — `app.py`, `Dockerfile`, and `deployment.yaml`.
 
-**Test:**
+**Image:**
+No pre-built public image exists for the API server. It must be built and pushed from source:
 ```bash
-kubectl port-forward svc/docs-agent-api -n docs-agent 8000:8000
+cd server-https   # in the kubeflow/docs-agent repo
+docker build -t <your-registry>/docs-agent-https-api:latest .
+docker push <your-registry>/docs-agent-https-api:latest
+```
+The `image` variable has no default — callers must supply it explicitly.
+
+**Resources created:**
+
+| Resource | Name | Namespace |
+|----------|------|-----------|
+| `kubernetes_config_map_v1` | `docs-agent-api-config` | `docs-agent` |
+| `kubernetes_secret_v1` | `docs-agent-api-secret` | `docs-agent` |
+| `kubernetes_deployment_v1` | `docs-agent-api` | `docs-agent` |
+| `kubernetes_service_v1` | `docs-agent-api` | `docs-agent` |
+
+**ConfigMap env vars (8 keys):**
+
+| Key | Value | Source |
+|-----|-------|--------|
+| `MILVUS_HOST` | `var.milvus_host` | Milvus module output |
+| `MILVUS_PORT` | `tostring(var.milvus_port)` | Milvus module output |
+| `MILVUS_COLLECTION` | `docs_rag` | Hardcoded — matches ETL pipeline |
+| `MILVUS_VECTOR_FIELD` | `vector` | Hardcoded — matches ETL pipeline |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-mpnet-base-v2` | Must match ETL embedding model |
+| `MODEL` | `var.llm_model` | Configurable — e.g. `llama-3.1-8b-instant` |
+| `PORT` | `8000` | Matches container port |
+| `PYTHONUNBUFFERED` | `1` | Ensures logs are flushed immediately |
+
+**Secret keys (sensitive):**
+
+| Key | Value |
+|-----|-------|
+| `KSERVE_URL` | `var.llm_endpoint` — LLM endpoint URL |
+| `LLM_API_KEY` | `var.llm_api_key` — API key (empty for KServe) |
+
+**Test results (Docker Desktop):**
+
+| Test | Result | Notes |
+|------|--------|-------|
+| `terraform apply -target=module.milvus -target=module.rbac -target=module.api_server` | ✅ 7/8 resources created | ConfigMap, Secret, Service all created |
+| Deployment rollout wait | ⏳ Times out | Expected — no pre-built image at `ghcr.io/jaiakash/docs-agent-api:latest` |
+| ConfigMap keys verified | ✅ All 8 keys correct | Confirmed via `kubectl get configmap docs-agent-api-config -n docs-agent -o yaml` |
+| Secret decoded | ✅ `KSERVE_URL` = Groq endpoint | Confirmed via `kubectl get secret docs-agent-api-secret -n docs-agent -o json \| jq` |
+| Security context | ✅ `runAsUser: 1000`, `allowPrivilegeEscalation: false` | Confirmed in pod spec |
+
+**Image:**
+A multi-arch (`linux/amd64` + `linux/arm64`) image was built via GitHub Actions in the forked repo and published to GHCR:
+```
+ghcr.io/kmr-rohit/docs-agent-api:sha-1f1339a
+```
+
+**Upstream fix applied:**
+The original `app.py` made unauthenticated requests to the LLM endpoint — no `Authorization` header was sent. This works for KServe (internal, no auth) but fails with external providers like Groq (HTTP 401). Fix submitted to `kubeflow/docs-agent`:
+```python
+headers = {}
+if LLM_API_KEY:
+    headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
+async with client.stream("POST", KSERVE_URL, json=payload, headers=headers) as response:
+```
+
+**Test results (Docker Desktop, Groq external LLM):**
+
+| Test | Result |
+|------|--------|
+| `terraform apply` | ✅ 8/8 resources created |
+| `kubectl rollout status deployment/docs-agent-api` | ✅ Successfully rolled out |
+| `GET /health` | ✅ 200 OK |
+| `POST /chat` with `stream: false` | ✅ Full LLM response returned |
+| `citations` field | `null` — expected, Milvus has no data yet (ETL pipeline not run) |
+
+**Sample response:**
+```json
+{
+  "response": "Kubeflow Pipelines is a platform for building, deploying, and managing machine learning (ML) pipelines...",
+  "citations": null
+}
+```
+
+`citations: null` is expected at this stage — the Milvus collection is empty until the KFP ETL pipeline runs to fetch, chunk, embed, and store the Kubeflow docs. Once populated, the `search_kubeflow_docs` tool call in the response will return real citations.
+
+**Test commands:**
+```bash
+# Apply
+terraform apply \
+  -target=module.milvus \
+  -target=module.rbac \
+  -target=module.api_server \
+  -var="kubeconfig_path=~/.kube/config" \
+  -var="api_image=ghcr.io/kmr-rohit/docs-agent-api:sha-1f1339a" \
+  -var="external_llm_api_key=<groq-key>"
+
+# Watch rollout
+kubectl rollout status deployment/docs-agent-api -n docs-agent
+
+# Health check
+kubectl port-forward svc/docs-agent-api -n docs-agent 8000:8000 &
 curl http://localhost:8000/health
+
+# Chat endpoint
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is Kubeflow Pipelines?", "stream": false}'
 ```
 
 ---

@@ -4,8 +4,15 @@ variable "namespace" {
 }
 
 variable "image" {
-  description = "Docker image for the docs-agent API server"
-  type        = string
+  description = <<-EOT
+    Docker image for the docs-agent API server (server-https/app.py).
+    No pre-built public image exists — build and push from the source repo:
+      cd server-https
+      docker build -t <your-registry>/docs-agent-https-api:latest .
+      docker push <your-registry>/docs-agent-https-api:latest
+    Source: https://github.com/kubeflow/docs-agent/tree/main/server-https
+  EOT
+  type = string
 }
 
 variable "replicas" {
