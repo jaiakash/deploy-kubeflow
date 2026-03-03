@@ -290,19 +290,56 @@ terraform destroy -target=module.milvus ...
 
 ---
 
-### Phase 3 — RBAC Module
+### Phase 3 — RBAC Module ✅ COMPLETE (tested on Docker Desktop)
 
 **Goal:** Kubeflow Pipelines service account can reach Milvus services.
 
-**Files to implement:**
-- `modules/rbac/main.tf` — `kubernetes_role` + `kubernetes_role_binding`
+**Files implemented:**
+- `modules/rbac/main.tf` — `kubernetes_role_v1` + `kubernetes_role_binding_v1`
+- `modules/rbac/outputs.tf` — exposes `role_name`, `role_binding_name`
 
-**Key implementation details:**
-- Role grants `get`, `list`, `watch` on `services` and `endpoints` in `docs-agent` namespace
-- RoleBinding binds to `serviceaccount/default-editor` in `kubeflow` namespace
-- This is the service account KFP uses when running pipeline steps
+**Resources created:**
 
-**Test:** `kubectl auth can-i list services --as=system:serviceaccount:kubeflow:default-editor -n docs-agent`
+| Resource | Name | Namespace |
+|----------|------|-----------|
+| `kubernetes_role_v1` | `milvus-access` | `docs-agent` |
+| `kubernetes_role_binding_v1` | `kfp-to-milvus-editor` | `docs-agent` |
+
+**Role rules:**
+```
+api_groups: [""]          ← core API group (services, endpoints live here)
+resources:  [services, endpoints]
+verbs:      [get, list, watch]
+```
+
+**RoleBinding subject:**
+```
+kind:      ServiceAccount
+name:      default-editor     ← KFP's pipeline step runner SA
+namespace: kubeflow            ← cross-namespace binding (valid in K8s)
+```
+
+**Why `api_groups = [""]`:**
+Empty string is the Kubernetes core API group — not a mistake. Services and endpoints are core/v1 resources. Named API groups (`apps`, `batch`, etc.) apply to higher-level resources like Deployments and Jobs.
+
+**Why cross-namespace RoleBinding:**
+KFP runs pipeline step pods in the `kubeflow` namespace using the `default-editor` service account. The Milvus service lives in `docs-agent`. A RoleBinding in `docs-agent` can reference a subject (service account) from any namespace — Kubernetes supports this by design.
+
+**Destroy order (Terraform-managed):**
+Terraform correctly destroys RoleBinding before Role (dependency order), then Helm release, then namespace — no manual ordering needed.
+
+**Test results (Docker Desktop):**
+
+| Test | Command | Expected | Result |
+|------|---------|----------|--------|
+| Apply | `terraform apply -target=module.milvus -target=module.rbac` | 4 resources created | ✅ |
+| Role exists | `kubectl get role milvus-access -n docs-agent` | Role present | ✅ |
+| RoleBinding exists | `kubectl get rolebinding kfp-to-milvus-editor -n docs-agent` | Bound to `kubeflow/default-editor` | ✅ |
+| Allowed: list services | `kubectl auth can-i list services --as=system:serviceaccount:kubeflow:default-editor -n docs-agent` | `yes` | ✅ |
+| Allowed: get endpoints | `kubectl auth can-i get endpoints --as=system:serviceaccount:kubeflow:default-editor -n docs-agent` | `yes` | ✅ |
+| Denied: create pods | `kubectl auth can-i create pods --as=system:serviceaccount:kubeflow:default-editor -n docs-agent` | `no` | ✅ |
+| Denied: cross-namespace | `kubectl auth can-i list services --as=system:serviceaccount:kubeflow:default-editor -n kube-system` | `no` | ✅ |
+| Destroy | `terraform destroy -target=module.rbac -target=module.milvus` | 4 resources destroyed, namespace gone in 13s | ✅ |
 
 ---
 
