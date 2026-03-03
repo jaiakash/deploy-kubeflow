@@ -343,7 +343,7 @@ Terraform correctly destroys RoleBinding before Role (dependency order), then He
 
 ---
 
-### Phase 4 — MCP Server + kagent 
+### Phase 4 — MCP Server + kagent ✅ COMPLETE (tested on Docker Desktop)
 
 > **Architecture change (confirmed by Santosh):** The `server-https` FastAPI server is deprecated. The new approach uses [`kagent-feast-mcp`](https://github.com/kubeflow/docs-agent/tree/main/kagent-feast-mcp) — a FastMCP tool server + kagent agent framework.
 
@@ -427,27 +427,65 @@ Three `security.istio.io/v1beta1` `AuthorizationPolicy` resources, gated by `var
 
 Required on OCI cluster (Kubeflow installs Istio with default-deny). Set `istio_enabled = false` for local Docker Desktop testing.
 
-#### Pending — waiting on Santosh
+#### MCP Server Image
 
-- **MCP server image** — needs to be built from [`kagent-feast-mcp/mcp-server/`](https://github.com/kubeflow/docs-agent/tree/main/kagent-feast-mcp/mcp-server) and published
-- **`server.py` env var support** — currently hardcodes `MILVUS_URI`, `MILVUS_USER` etc. as module-level constants. Needs to read from `os.getenv()` for the Terraform ConfigMap to take effect
-- Once image is available: set `var.mcp_image` and run end-to-end test on OCI cluster
+- **Image:** `ghcr.io/kmr-rohit/mcp-kubeflow-docs:sha-473f421`
+- **`server.py` updated:** `os.getenv()` reads env vars from Terraform ConfigMap (MILVUS_URI, MILVUS_USER, MILVUS_PASSWORD, COLLECTION_NAME, EMBEDDING_MODEL, PORT)
+- Built with `docker buildx --platform linux/amd64,linux/arm64` (multi-arch for OCI ARM nodes)
 
-#### Test commands (once image is ready)
+#### Test results (Docker Desktop — local end-to-end) ✅
+
+**Two-phase apply** required — kagent CRDs (`ModelConfig`, `RemoteMCPServer`, `Agent`) use `kubernetes_manifest` which validates against the cluster API at plan time. Phase 1 installs Helm charts (registers CRDs), Phase 2 creates CRD instances.
+
 ```bash
+# Phase 1: Infra + Helm charts (11 resources)
 terraform apply \
   -target=module.milvus \
   -target=module.rbac \
   -target=module.mcp_server \
-  -target=module.kagent \
-  -var="mcp_image=<registry>/mcp-kubeflow-docs:<tag>" \
-  -var="groq_api_key=<key>" \
-  -var="istio_enabled=false"   # for local; true on OCI
+  -target=module.kagent.helm_release.kagent_crds \
+  -target=module.kagent.helm_release.kagent \
+  -target=module.kagent.kubernetes_secret_v1.groq
 
-# Access kagent UI
-kubectl -n docs-agent port-forward service/kagent-ui 8080:8080
-# Open http://localhost:8080
+# Phase 2: CRD instances (3 resources)
+terraform apply -target=module.kagent
 ```
+
+| Component | Pods | Status |
+|-----------|------|--------|
+| Milvus standalone | `milvus-standalone`, `etcd-0`, `minio` | All 1/1 Running |
+| MCP server | `mcp-kubeflow-docs` | 1/1 Running, startup ~36s |
+| kagent controller | `kagent-controller` | 1/1 Running |
+| kagent kmcp-controller | `kagent-kmcp-controller-manager` | 1/1 Running |
+| kagent tools | `kagent-tools` | 1/1 Running |
+| kagent UI | `kagent-ui` | 1/1 Running |
+| Agent deployment | `kubeflow-docs-agent` | 1/1 Running (A2A server) |
+
+**Total: 14 Terraform resources, 9 pods, all healthy.**
+
+| CRD | Name | Status |
+|-----|------|--------|
+| `ModelConfig` | `groq-llama` | Provider=OpenAI, Model=llama-3.1-8b-instant |
+| `RemoteMCPServer` | `kubeflow-docs-mcp` | ACCEPTED=True, URL=mcp-kubeflow-docs:8000/mcp |
+| `Agent` | `kubeflow-docs-agent` | READY=True, ACCEPTED=True |
+
+**Full chain test (A2A → Groq → MCP → Milvus):**
+
+Sent A2A `message/send` request with "What is Kubeflow Pipelines?":
+1. kagent agent received query via A2A protocol
+2. Groq LLM (llama-3.1-8b-instant) processed it — triggered `search_kubeflow_docs` tool call
+3. MCP server received tool call, queried Milvus
+4. Milvus returned `collection not found[collection=kubeflow_docs_docs_rag]` — **expected** (no ETL pipeline run yet)
+5. LLM gracefully fell back to general knowledge and responded
+6. Total tokens: 992 (713 prompt + 279 completion)
+
+**Known issues (local testing only):**
+- OKE module must be commented out for local testing — OCI provider validates creds at configure time, even with `-target`
+- kagent UI `/api/` routes return 502 — nginx proxies to `127.0.0.1:8083` but controller is in a separate pod. Workaround: port-forward `kagent-controller:8083` directly. The `/a2a/` chat route works fine (server-side Next.js).
+
+#### Remaining for production
+- Run KFP ETL pipeline to populate `kubeflow_docs_docs_rag` collection in Milvus
+- Deploy on OCI cluster with real creds (full `terraform apply` including OKE + Kubeflow Platform)
 
 ---
 
