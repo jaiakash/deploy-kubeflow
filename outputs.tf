@@ -37,3 +37,8 @@ output "kserve_endpoint" {
   description = "KServe inference endpoint (N/A when deploy_kserve = false)"
   value       = var.deploy_kserve ? module.kserve_llm[0].kserve_endpoint : "N/A — using Groq external LLM"
 }
+
+output "etl_job_name" {
+  description = "ETL pipeline Job name (N/A when run_etl_pipeline = false)"
+  value       = var.run_etl_pipeline ? module.etl_pipeline[0].job_name : "N/A"
+}

@@ -42,10 +42,10 @@ module "kubeflow_platform" {
 module "milvus" {
   source = "./modules/milvus"
 
-  namespace      = var.milvus_namespace
-  release_name   = var.milvus_release_name
-  chart_version  = var.milvus_chart_version
-  istio_enabled  = var.istio_enabled
+  namespace     = var.milvus_namespace
+  release_name  = var.milvus_release_name
+  chart_version = var.milvus_chart_version
+  istio_enabled = var.istio_enabled
 
   depends_on = [module.kubeflow_platform]
 }
@@ -109,4 +109,31 @@ module "kagent" {
   mcp_server_url = module.mcp_server.mcp_endpoint
 
   depends_on = [module.mcp_server]
+}
+
+# ============================================================
+# ETL Pipeline (optional — indexes Kubeflow docs into Milvus)
+# ============================================================
+# Runs a one-shot K8s Job that crawls docs, chunks, embeds,
+# and writes vectors to Milvus. Gated by var.run_etl_pipeline.
+# To re-index: terraform taint 'module.etl_pipeline[0].kubernetes_job_v1.etl_pipeline'
+
+module "etl_pipeline" {
+  source = "./modules/etl-pipeline"
+  count  = var.run_etl_pipeline ? 1 : 0
+
+  namespace        = var.milvus_namespace
+  image            = var.etl_image
+  milvus_host      = module.milvus.milvus_host
+  milvus_port      = module.milvus.milvus_port
+  milvus_password  = var.milvus_password
+  github_token     = var.github_token
+  github_repo      = var.etl_github_repo
+  github_docs_path = var.etl_github_docs_path
+  collection_name  = var.etl_collection_name
+  embedding_model  = var.etl_embedding_model
+  chunk_size       = var.etl_chunk_size
+  chunk_overlap    = var.etl_chunk_overlap
+
+  depends_on = [module.milvus]
 }

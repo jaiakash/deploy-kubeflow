@@ -211,3 +211,62 @@ variable "istio_enabled" {
   type        = bool
   default     = true
 }
+
+# ============================================================
+# ETL Pipeline (optional — indexes Kubeflow docs into Milvus)
+# ============================================================
+
+variable "run_etl_pipeline" {
+  description = "Set to true to run the ETL pipeline Job that indexes Kubeflow docs into Milvus"
+  type        = bool
+  default     = false
+}
+
+variable "etl_image" {
+  description = "Docker image for the ETL pipeline (must include sentence-transformers, pymilvus, etc.)"
+  type        = string
+  default     = ""
+}
+
+variable "github_token" {
+  description = "GitHub personal access token for API rate limits during doc crawling"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "etl_github_repo" {
+  description = "GitHub repo to crawl for Kubeflow docs (owner/repo)"
+  type        = string
+  default     = "kubeflow/website"
+}
+
+variable "etl_github_docs_path" {
+  description = "Path within the repo to crawl for documentation"
+  type        = string
+  default     = "content/en/docs"
+}
+
+variable "etl_collection_name" {
+  description = "Milvus collection name for indexed documents"
+  type        = string
+  default     = "kubeflow_docs_docs_rag"
+}
+
+variable "etl_embedding_model" {
+  description = "Sentence-transformers model for embeddings"
+  type        = string
+  default     = "sentence-transformers/all-mpnet-base-v2"
+}
+
+variable "etl_chunk_size" {
+  description = "Character count per document chunk"
+  type        = number
+  default     = 1000
+}
+
+variable "etl_chunk_overlap" {
+  description = "Overlap between consecutive chunks in characters"
+  type        = number
+  default     = 100
+}

@@ -76,3 +76,19 @@ mcp_replicas = 1
 # true  = OCI cluster with full Kubeflow (Istio installed)
 # false = local Docker Desktop testing (no Istio)
 istio_enabled = true
+
+# ============================================================
+# ETL Pipeline (optional — indexes Kubeflow docs into Milvus)
+# ============================================================
+# Set run_etl_pipeline = true and provide etl_image to run the
+# indexing job during terraform apply. The job blocks until done.
+# To re-index: terraform taint 'module.etl_pipeline[0].kubernetes_job_v1.etl_pipeline'
+# run_etl_pipeline     = true
+# etl_image            = "ghcr.io/<registry>/etl-kubeflow-docs:latest"
+# github_token         = "ghp_xxxxxxxxxxxxxxxxxxxx"
+# etl_github_repo      = "kubeflow/website"
+# etl_github_docs_path = "content/en/docs"
+# etl_collection_name  = "kubeflow_docs_docs_rag"
+# etl_embedding_model  = "sentence-transformers/all-mpnet-base-v2"
+# etl_chunk_size       = 1000
+# etl_chunk_overlap    = 100
