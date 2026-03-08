@@ -1,0 +1,42 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit it.
+
+# ============================================================
+# OCI Authentication
+# ============================================================
+tenancy_ocid     = "ocid1.tenancy.oc1..example"
+user_ocid        = "ocid1.user.oc1..example"
+fingerprint      = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+private_key_path = "~/.oci/oci_api_key.pem"
+region           = "us-ashburn-1"
+
+# ============================================================
+# OKE Cluster
+# ============================================================
+# Find compartment_id in OCI Console → Identity → Compartments
+# or use root compartment = tenancy_ocid value.
+compartment_id = "ocid1.compartment.oc1..example"
+cluster_name   = "kubeflow-cluster"
+k8s_version    = "v1.34.2"
+
+# VM.Standard.E5.Flex nodes (x86)
+node_count          = 2
+node_ocpus          = 2
+node_memory_gb      = 12
+node_boot_volume_gb = 50
+
+# ============================================================
+# Cluster Access
+# ============================================================
+# Generated after apply via the kubeconfig_command output:
+#   oci ce cluster create-kubeconfig --cluster-id <id> --region us-ashburn-1 \
+#     --token-version 2.0.0 --kube-endpoint PUBLIC_ENDPOINT
+kubeconfig_path = "~/.kube/config"
+
+# ============================================================
+# Kubeflow
+# ============================================================
+kf_version = "master"
+
+# Override kf_components only if you need to add/remove Kubeflow components.
+# The default list in variables.tf installs the recommended set.

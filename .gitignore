@@ -1,0 +1,45 @@
+# Terraform state — never commit
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform variable files with actual secrets
+*.tfvars
+!terraform.tfvars.example
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files (local experiments)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Sensitive key material
+*.pem
+*.key
+*.p8
+
+# OCI config with credentials
+oci_api_key*.pem
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local settings
+.claude/
+
+# Local scratch / explanations
+Explanations/
