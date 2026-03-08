@@ -7,8 +7,8 @@ terraform {
     # Format: https://<namespace>.compat.objectstorage.<region>.oraclecloud.com
     endpoint = "https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
 
-    bucket = "terraform-state-docs-agent"
-    key    = "docs-agent/terraform.tfstate"
+    bucket = "terraform-state-kubeflow"
+    key    = "kubeflow/terraform.tfstate"
     region = "us-ashburn-1" # Change to your OCI region
 
     # OCI does not use AWS-style access key auth the same way,

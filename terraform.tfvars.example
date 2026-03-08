@@ -16,10 +16,10 @@ region           = "us-ashburn-1"
 # Find compartment_id in OCI Console → Identity → Compartments
 # or use root compartment = tenancy_ocid value.
 compartment_id = "ocid1.compartment.oc1..example"
-cluster_name   = "docs-agent-cluster"
-k8s_version    = "v1.30.1"
+cluster_name   = "kubeflow-cluster"
+k8s_version    = "v1.34.2"
 
-# Free tier: 4 OCPU + 24 GB total — split across 2 nodes
+# VM.Standard.E5.Flex nodes (x86)
 node_count          = 2
 node_ocpus          = 2
 node_memory_gb      = 12
@@ -38,57 +38,5 @@ kubeconfig_path = "~/.kube/config"
 # ============================================================
 kf_version = "master"
 
-# ============================================================
-# Milvus
-# ============================================================
-milvus_namespace    = "docs-agent"
-milvus_release_name = "my-release"
-# milvus_chart_version = "4.2.7"  # Pin if needed; default is fine
-
-# ============================================================
-# LLM — Groq (used by kagent)
-# ============================================================
-groq_api_key = "gsk_xxxxxxxxxxxxxxxxxxxx"    # Get from console.groq.com
-llm_model    = "llama-3.1-8b-instant"
-llm_base_url = "https://api.groq.com/openai/v1"
-
-# ============================================================
-# MCP Server
-# ============================================================
-# Image built by Santosh from kagent-feast-mcp/mcp-server/
-# Source: https://github.com/kubeflow/docs-agent/tree/main/kagent-feast-mcp/mcp-server
-mcp_image    = "ghcr.io/<registry>/mcp-kubeflow-docs:latest"
-mcp_replicas = 1
-
-# Milvus default root password — change if you customised the Helm install
-# milvus_password = "Milvus"
-
-# ============================================================
-# KServe LLM (optional — uncomment to enable, GPU node required)
-# ============================================================
-# deploy_kserve     = true
-# huggingface_token = "hf_xxxxxxxxxxxxxxxxxxxx"
-# kserve_model_id   = "RedHatAI/Llama-3.1-8B-Instruct"
-
-# ============================================================
-# Istio
-# ============================================================
-# true  = OCI cluster with full Kubeflow (Istio installed)
-# false = local Docker Desktop testing (no Istio)
-istio_enabled = true
-
-# ============================================================
-# ETL Pipeline (optional — indexes Kubeflow docs into Milvus)
-# ============================================================
-# Set run_etl_pipeline = true and provide etl_image to run the
-# indexing job during terraform apply. The job blocks until done.
-# To re-index: terraform taint 'module.etl_pipeline[0].kubernetes_job_v1.etl_pipeline'
-# run_etl_pipeline     = true
-# etl_image            = "ghcr.io/<registry>/etl-kubeflow-docs:latest"
-# github_token         = "ghp_xxxxxxxxxxxxxxxxxxxx"
-# etl_github_repo      = "kubeflow/website"
-# etl_github_docs_path = "content/en/docs"
-# etl_collection_name  = "kubeflow_docs_docs_rag"
-# etl_embedding_model  = "sentence-transformers/all-mpnet-base-v2"
-# etl_chunk_size       = 1000
-# etl_chunk_overlap    = 100
+# Override kf_components only if you need to add/remove Kubeflow components.
+# The default list in variables.tf installs the recommended set.

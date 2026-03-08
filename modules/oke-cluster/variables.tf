@@ -15,9 +15,9 @@ variable "cluster_name" {
 }
 
 variable "k8s_version" {
-  description = "Kubernetes version for the OKE cluster and node pool (e.g. v1.30.1)"
+  description = "Kubernetes version for the OKE cluster and node pool (e.g. v1.31.1)"
   type        = string
-  default     = "v1.30.1"
+  default     = "v1.34.2"
 }
 
 variable "node_count" {

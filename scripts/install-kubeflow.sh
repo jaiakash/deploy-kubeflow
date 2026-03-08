@@ -10,7 +10,7 @@ set -euo pipefail
 
 MANIFESTS_DIR="/tmp/kubeflow-manifests"
 MANIFESTS_REPO="https://github.com/kubeflow/manifests.git"
-MAX_RETRIES=5
+MAX_RETRIES=8
 RETRY_WAIT=30
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -57,13 +57,35 @@ apply_component() {
 
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     log "Applying [$attempt/$MAX_RETRIES] $component..."
-    if kustomize build "$full_path" | kubectl apply --server-side --kubeconfig="$KUBECONFIG" -f -; then
+    local output
+    if output=$(
+      {
+        kustomize build "$full_path" \
+        | sed -E '
+            s|image: kserve/|image: docker.io/kserve/|g;
+            s|image: mysql:|image: docker.io/mysql:|g;
+            s|image: chrislusf/|image: docker.io/chrislusf/|g;
+            /mysql-native-password=ON/d
+          ' \
+        | kubectl apply --server-side --force-conflicts \
+            --kubeconfig="$KUBECONFIG" -f -
+      } 2>&1
+    ); then
+      echo "$output"
       log "✅ $component"
       return 0
     fi
+    echo "$output"
     if [ "$attempt" -lt "$MAX_RETRIES" ]; then
-      log "⏳ Retrying in ${RETRY_WAIT}s (CRDs may still be propagating)..."
-      sleep "$RETRY_WAIT"
+      # If a webhook is failing, wait for its deployment to become ready
+      if echo "$output" | grep -q "failed calling webhook"; then
+        log "⏳ Webhook not ready — waiting for deployments in kubeflow namespace (up to 90s)..."
+        kubectl wait --for=condition=Available deployment --all \
+          -n kubeflow --timeout=90s --kubeconfig="$KUBECONFIG" 2>/dev/null || true
+      else
+        log "⏳ Retrying in ${RETRY_WAIT}s (CRDs may still be propagating)..."
+        sleep "$RETRY_WAIT"
+      fi
     fi
   done
 
@@ -71,11 +93,105 @@ apply_component() {
   return 1
 }
 
+# ---- Fix short-name images for CRI-O (OKE uses CRI-O with strict enforcement) ----
+# OCI OKE nodes reject images without an explicit registry prefix.
+# KServe manifests use short names like "kserve/kserve-controller:v0.16.0"
+# which CRI-O can't resolve. This patches them to fully-qualified names.
+fix_short_name_images() {
+  log "Patching short-name container images for CRI-O compatibility..."
+
+  # Collect all deployments in kubeflow namespace and fix unqualified images
+  local deployments
+  deployments=$(kubectl get deployments -n kubeflow -o jsonpath='{.items[*].metadata.name}' \
+    --kubeconfig="$KUBECONFIG" 2>/dev/null || true)
+
+  for deploy in $deployments; do
+    # Get all container images for this deployment
+    local images
+    images=$(kubectl get deployment "$deploy" -n kubeflow \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' \
+      --kubeconfig="$KUBECONFIG" 2>/dev/null || true)
+
+    for image in $images; do
+      # Skip if already fully qualified (contains a dot before the first slash = has registry)
+      if echo "$image" | grep -qE '^[^/]+\.[^/]+/'; then
+        continue
+      fi
+      # Skip single-word images (e.g. "busybox") — unlikely in KF but be safe
+      if ! echo "$image" | grep -q '/'; then
+        continue
+      fi
+      # Image is like "kserve/kserve-controller:v0.16.0" — prefix with docker.io
+      local qualified="docker.io/$image"
+      local container_name
+      # Find which container uses this image
+      container_name=$(kubectl get deployment "$deploy" -n kubeflow \
+        -o jsonpath="{.spec.template.spec.containers[?(@.image=='$image')].name}" \
+        --kubeconfig="$KUBECONFIG" 2>/dev/null || true)
+      if [ -n "$container_name" ]; then
+        log "  Fixing $deploy/$container_name: $image → $qualified"
+        kubectl set image "deployment/$deploy" "$container_name=$qualified" \
+          -n kubeflow --kubeconfig="$KUBECONFIG" 2>/dev/null || true
+      fi
+    done
+  done
+
+  log "Image patching complete."
+}
+
+# ---- Wait for KServe webhook after patching ----
+wait_for_kserve_webhook() {
+  log "Waiting for KServe webhook to become ready (up to 3m)..."
+  kubectl wait --for=condition=Available deployment/kserve-controller-manager \
+    -n kubeflow --timeout=180s --kubeconfig="$KUBECONFIG" 2>/dev/null || \
+    log "⚠️  KServe controller not ready yet — subsequent applies will retry"
+
+  # Give the webhook endpoint a moment to register
+  sleep 5
+}
+
+# ---- Ensure MySQL PVC exists before Pipelines install ----
+# Kubeflow Pipelines expects a PVC named mysql-pv-claim but the manifests
+# don't always create it. On OKE we use the oci-bv (block volume) StorageClass.
+ensure_mysql_pvc() {
+  if kubectl get pvc mysql-pv-claim -n kubeflow --kubeconfig="$KUBECONFIG" >/dev/null 2>&1; then
+    log "mysql-pv-claim PVC already exists — skipping"
+    return 0
+  fi
+
+  log "Creating mysql-pv-claim PVC for Kubeflow Pipelines..."
+  cat <<EOF | kubectl apply --kubeconfig="$KUBECONFIG" -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pv-claim
+  namespace: kubeflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: oci-bv
+  resources:
+    requests:
+      storage: 20Gi
+EOF
+}
+
 IFS=',' read -ra COMPONENTS <<< "$KF_COMPONENTS"
 log "Installing ${#COMPONENTS[@]} Kubeflow components..."
 
 for component in "${COMPONENTS[@]}"; do
+  # Ensure MySQL PVC exists before installing Pipelines
+  if echo "$component" | grep -q "pipeline"; then
+    ensure_mysql_pvc
+  fi
+
   apply_component "$component"
+
+  # After KServe base is applied, fix images and wait for webhook
+  if echo "$component" | grep -q "kserve/kserve$"; then
+    fix_short_name_images
+    wait_for_kserve_webhook
+  fi
 done
 
 # ---- Wait for core components ----

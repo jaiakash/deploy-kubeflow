@@ -26,9 +26,9 @@ data "oci_core_services" "regional" {
   }
 }
 
-# OKE node images for ARM. Picks the first aarch64 image that matches the
-# requested k8s version — avoids hardcoding region-specific image OCIDs.
-data "oci_containerengine_node_pool_option" "arm" {
+# OKE node images for x86 (E5.Flex). The data source filters by shape and
+# k8s version so we just pick the first compatible image.
+data "oci_containerengine_node_pool_option" "amd" {
   node_pool_option_id = "all"
   compartment_id      = var.compartment_id
 }
@@ -36,20 +36,25 @@ data "oci_containerengine_node_pool_option" "arm" {
 locals {
   k8s_version_short = replace(var.k8s_version, "v", "")
 
-  # Find first ARM (aarch64) OKE image matching the requested k8s version.
-  # OCI image names follow: Oracle-Linux-8.x-aarch64-OKE-<k8s>-<date>
-  arm_image_id = try(
+  # Find first standard x86_64 OKE image matching the requested k8s version.
+  # Excludes aarch64 (ARM) and Gen2-GPU images — E5.Flex is standard x86.
+  # Image naming: Oracle-Linux-8.10-2025.11.20-0-OKE-<k8s>-<build>
+  node_image_id = try(
     [
-      for s in data.oci_containerengine_node_pool_option.arm.sources :
+      for s in data.oci_containerengine_node_pool_option.amd.sources :
       s.image_id
-      if can(regex("aarch64", s.source_name)) &&
-      can(regex(local.k8s_version_short, s.source_name))
+      if !can(regex("aarch64", s.source_name)) &&
+      !can(regex("GPU", s.source_name)) &&
+      can(regex(local.k8s_version_short, s.source_name)) &&
+      can(regex("Oracle-Linux-8", s.source_name))
     ][0],
-    # Fallback: any aarch64 image if version-specific one not found
+    # Fallback: any standard x86 OL8 image
     [
-      for s in data.oci_containerengine_node_pool_option.arm.sources :
+      for s in data.oci_containerengine_node_pool_option.amd.sources :
       s.image_id
-      if can(regex("aarch64", s.source_name))
+      if !can(regex("aarch64", s.source_name)) &&
+      !can(regex("GPU", s.source_name)) &&
+      can(regex("Oracle-Linux-8", s.source_name))
     ][0]
   )
 }
@@ -130,8 +135,9 @@ resource "oci_core_route_table" "private" {
 
 # ── Security lists ───────────────────────────────────────────────────────────
 
-# API endpoint subnet — allows kubectl from anywhere, and kubelet traffic
-# to/from worker nodes.
+# API endpoint subnet — allows kubectl from anywhere, kubelet + Flannel
+# traffic to/from worker nodes, and OKE service communication.
+# Ref: https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengnetworkconfig.htm
 resource "oci_core_security_list" "api_endpoint" {
   compartment_id = var.compartment_id
   vcn_id         = oci_core_vcn.main.id
@@ -147,7 +153,7 @@ resource "oci_core_security_list" "api_endpoint" {
     }
   }
 
-  # Ingress: OKE control plane health check from workers
+  # Ingress: worker nodes → API endpoint (k8s API)
   ingress_security_rules {
     protocol = "6"
     source   = cidrsubnet(var.vcn_cidr, 8, 1) # private subnet
@@ -157,60 +163,82 @@ resource "oci_core_security_list" "api_endpoint" {
     }
   }
 
-  # Egress: reach worker nodes for kubelet
-  egress_security_rules {
-    protocol    = "6"
-    destination = cidrsubnet(var.vcn_cidr, 8, 1)
-    tcp_options {
-      min = 10250
-      max = 10250
-    }
-  }
-  egress_security_rules {
-    protocol    = "6"
-    destination = cidrsubnet(var.vcn_cidr, 8, 1)
+  # Ingress: worker nodes → API endpoint (OKE port)
+  ingress_security_rules {
+    protocol = "6"
+    source   = cidrsubnet(var.vcn_cidr, 8, 1)
     tcp_options {
       min = 12250
       max = 12250
     }
   }
 
-  # Egress: ICMP for path MTU discovery
+  # Ingress: ICMP Path Discovery from workers
+  ingress_security_rules {
+    protocol = "1" # ICMP
+    source   = cidrsubnet(var.vcn_cidr, 8, 1)
+    icmp_options {
+      type = 3
+      code = 4
+    }
+  }
+
+  # Egress: ALL TCP to worker nodes (Flannel CNI needs broad access)
+  egress_security_rules {
+    protocol    = "6"
+    destination = cidrsubnet(var.vcn_cidr, 8, 1)
+  }
+
+  # Egress: ICMP Path Discovery to workers
   egress_security_rules {
     protocol    = "1" # ICMP
     destination = cidrsubnet(var.vcn_cidr, 8, 1)
+    icmp_options {
+      type = 3
+      code = 4
+    }
+  }
+
+  # Egress: OKE service communication via Oracle Services Network
+  egress_security_rules {
+    protocol         = "6"
+    destination      = data.oci_core_services.regional.services[0].cidr_block
+    destination_type = "SERVICE_CIDR_BLOCK"
+    tcp_options {
+      min = 443
+      max = 443
+    }
   }
 }
 
-# Worker node subnet — allows kubelet from API endpoint, pod traffic,
-# and NodePort access from the load balancer subnet.
+# Worker node subnet — allows ALL TCP from API endpoint (Flannel CNI),
+# inter-node pod traffic, and NodePort from LB subnet.
+# Ref: https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengnetworkconfig.htm
 resource "oci_core_security_list" "workers" {
   compartment_id = var.compartment_id
   vcn_id         = oci_core_vcn.main.id
   display_name   = "${var.cluster_name}-workers-sl"
 
-  # Ingress: kubelet from API endpoint
+  # Ingress: ALL TCP from API endpoint (Flannel CNI requires broad access)
   ingress_security_rules {
     protocol = "6"
     source   = cidrsubnet(var.vcn_cidr, 8, 0) # public subnet (API endpoint)
-    tcp_options {
-      min = 10250
-      max = 10250
-    }
-  }
-  ingress_security_rules {
-    protocol = "6"
-    source   = cidrsubnet(var.vcn_cidr, 8, 0)
-    tcp_options {
-      min = 12250
-      max = 12250
-    }
   }
 
   # Ingress: inter-node pod traffic (Flannel overlay)
   ingress_security_rules {
     protocol = "all"
     source   = cidrsubnet(var.vcn_cidr, 8, 1) # private subnet
+  }
+
+  # Ingress: ICMP Path Discovery
+  ingress_security_rules {
+    protocol = "1" # ICMP
+    source   = "0.0.0.0/0"
+    icmp_options {
+      type = 3
+      code = 4
+    }
   }
 
   # Ingress: NodePort from load balancer subnet
@@ -259,6 +287,16 @@ resource "oci_core_security_list" "lb" {
     tcp_options {
       min = 30000
       max = 32767
+    }
+  }
+
+  # Egress: kube-proxy health check on workers
+  egress_security_rules {
+    protocol    = "6"
+    destination = cidrsubnet(var.vcn_cidr, 8, 1)
+    tcp_options {
+      min = 10256
+      max = 10256
     }
   }
 }
@@ -346,15 +384,15 @@ resource "oci_containerengine_node_pool" "main" {
   name               = "${var.cluster_name}-node-pool"
   kubernetes_version = var.k8s_version
 
-  # ARM Ampere A1.Flex — the OCI Always Free tier shape.
-  node_shape = "VM.Standard.A1.Flex"
+  # x86 E5.Flex shape
+  node_shape = "VM.Standard.E5.Flex"
   node_shape_config {
     ocpus         = var.node_ocpus
     memory_in_gbs = var.node_memory_gb
   }
 
   node_source_details {
-    image_id                = local.arm_image_id
+    image_id                = local.node_image_id
     source_type             = "IMAGE"
     boot_volume_size_in_gbs = var.node_boot_volume_gb
   }
@@ -364,12 +402,9 @@ resource "oci_containerengine_node_pool" "main" {
 
     # Spread across all ADs — A1.Flex capacity can be limited in a single AD.
     # OKE will place nodes wherever capacity is available.
-    dynamic "placement_configs" {
-      for_each = data.oci_identity_availability_domains.ads.availability_domains
-      content {
-        availability_domain = placement_configs.value.name
-        subnet_id           = oci_core_subnet.private.id
-      }
+    placement_configs {
+      availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+      subnet_id           = oci_core_subnet.private.id
     }
 
     # Flannel overlay CNI — simpler than VCN-native pod networking,

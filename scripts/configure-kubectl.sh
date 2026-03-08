@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # configure-kubectl.sh — Generate kubeconfig for an OCI OKE cluster.
-# Run this once after Akash's OKE cluster module creates the cluster,
-# before running 'terraform apply' for the docs-agent stack.
+# Run this once after the OKE cluster module creates the cluster,
+# before running 'terraform apply' for the Kubeflow platform.
 #
 # Usage:
 #   CLUSTER_ID=ocid1.cluster.oc1... \

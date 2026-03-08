@@ -2,6 +2,8 @@ locals {
   # Comma-joined string so the destroy provisioner can read it back
   # via self.triggers — Terraform functions aren't available in destroy context.
   components_str = join(",", var.kf_components)
+  # Expand ~ to absolute path — local-exec doesn't do shell tilde expansion.
+  kubeconfig = pathexpand(var.kubeconfig_path)
 }
 
 # null_resource wrapping the kustomize-based Kubeflow install.
@@ -11,13 +13,13 @@ resource "null_resource" "kubeflow_install" {
   triggers = {
     kf_version    = var.kf_version
     kf_components = local.components_str
-    kubeconfig    = var.kubeconfig_path
+    kubeconfig    = local.kubeconfig
   }
 
   provisioner "local-exec" {
     command = "${path.module}/../../scripts/install-kubeflow.sh"
     environment = {
-      KUBECONFIG    = var.kubeconfig_path
+      KUBECONFIG    = local.kubeconfig
       KF_VERSION    = var.kf_version
       KF_COMPONENTS = local.components_str
     }
