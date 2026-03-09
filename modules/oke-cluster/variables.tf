@@ -11,7 +11,7 @@ variable "region" {
 variable "cluster_name" {
   description = "Display name for the OKE cluster and associated resources"
   type        = string
-  default     = "docs-agent-cluster"
+  default     = "kubeflow-cluster"
 }
 
 variable "k8s_version" {
@@ -21,19 +21,19 @@ variable "k8s_version" {
 }
 
 variable "node_count" {
-  description = "Number of worker nodes (2 recommended for HA on free tier)"
+  description = "Number of worker nodes (2 recommended for HA)"
   type        = number
   default     = 2
 }
 
 variable "node_ocpus" {
-  description = "OCPUs per node — free tier total is 4 OCPU across all A1.Flex instances"
+  description = "OCPUs per node (E5.Flex shape)"
   type        = number
   default     = 2
 }
 
 variable "node_memory_gb" {
-  description = "Memory (GB) per node — free tier total is 24 GB across all A1.Flex instances"
+  description = "Memory (GB) per node (E5.Flex shape)"
   type        = number
   default     = 12
 }

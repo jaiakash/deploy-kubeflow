@@ -30,7 +30,7 @@ log "Target cluster: $(kubectl --kubeconfig="$KUBECONFIG" cluster-info 2>&1 | he
 # ---- Clone or update manifests ----
 if [ -d "$MANIFESTS_DIR/.git" ]; then
   log "Manifests already cloned — fetching latest and checking out $KF_VERSION..."
-  git -C "$MANIFESTS_DIR" fetch --all --quiet
+  git -C "$MANIFESTS_DIR" fetch --depth=1 --all --quiet
   git -C "$MANIFESTS_DIR" checkout "$KF_VERSION" --quiet 2>/dev/null || \
     git -C "$MANIFESTS_DIR" checkout -b "$KF_VERSION" "origin/$KF_VERSION" --quiet
 else

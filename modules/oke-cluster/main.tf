@@ -9,8 +9,8 @@ terraform {
 
 # ── Data sources ────────────────────────────────────────────────────────────
 
-# All availability domains in the compartment — node pool spreads across
-# all ADs to maximise A1.Flex capacity availability on free tier.
+# All availability domains in the compartment — used to select an AD for
+# node pool placement.
 data "oci_identity_availability_domains" "ads" {
   compartment_id = var.compartment_id
 }
@@ -34,7 +34,7 @@ data "oci_containerengine_node_pool_option" "amd" {
 }
 
 locals {
-  k8s_version_short = replace(var.k8s_version, "v", "")
+  k8s_version_short = trimprefix(var.k8s_version, "v")
 
   # Find first standard x86_64 OKE image matching the requested k8s version.
   # Excludes aarch64 (ARM) and Gen2-GPU images — E5.Flex is standard x86.
@@ -66,7 +66,7 @@ resource "oci_core_vcn" "main" {
   cidr_blocks    = [var.vcn_cidr]
   display_name   = "${var.cluster_name}-vcn"
   # dns_label: max 15 chars, alphanumeric only, must start with letter
-  dns_label = "docskf"
+  dns_label = substr(replace(var.cluster_name, "-", ""), 0, 15)
 }
 
 # ── Gateways ─────────────────────────────────────────────────────────────────
@@ -400,8 +400,7 @@ resource "oci_containerengine_node_pool" "main" {
   node_config_details {
     size = var.node_count
 
-    # Spread across all ADs — A1.Flex capacity can be limited in a single AD.
-    # OKE will place nodes wherever capacity is available.
+    # Single AD placement — E5.Flex nodes placed in the first available AD.
     placement_configs {
       availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
       subnet_id           = oci_core_subnet.private.id
